@@ -6,7 +6,7 @@ from pathlib import Path
 from gaterpc.utils import LazyAttribute
 
 
-DEBUG = 0
+DEBUG = 1
 BASE_PATH = Path(__file__).parent.joinpath("workdir")
 # CHESTNUTS = Path("/dev/loop1")
 CHESTNUTS = BASE_PATH.joinpath("burrow/chestnuts")

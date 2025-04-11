@@ -8,15 +8,13 @@ from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Callable, Iterable
 from pathlib import Path
-from threading import Lock as TLock, _CRLock, _PyRLock
+from threading import Lock, RLock, Condition
 from typing import Any, Optional, Union, overload
 
 from .exceptions import KeyExistsError
 
 
 logger = logging.getLogger(__name__)
-BPTLock = _CRLock()
-# BPTLock = TLock()
 
 
 def b(a, x):
@@ -38,6 +36,79 @@ def b_1(a, x):
         else: hi = mid
     return hi - 1 if hi else hi
 
+
+class RWLock:
+    _read_lock = Condition()
+    _write_lock = Condition()
+    readers = 0
+    waiting_writers = 0
+    waiting_readers = 0
+    writing = False
+
+    def acquire_read(self):
+        self._read_lock.acquire()
+        self.waiting_readers += 1
+        self._read_lock.wait_for(
+            lambda : not self.waiting_writers or not self.writing
+        )
+        self.waiting_readers -= 1
+        self.readers += 1
+
+    def release_read(self):
+        self.readers -= 1
+        if not self.readers:
+            with self._write_lock:
+                self._write_lock.notify()
+        self._read_lock.release()
+
+    def acquire_write(self):
+        self._write_lock.acquire()
+        self.waiting_writers += 1
+        self._write_lock.wait_for(
+            lambda : not self.readers or not self.writing
+        )
+        self.waiting_writers -= 1
+        self.writing = True
+
+    def release_write(self):
+        self.writing = False
+        if self.waiting_writers:
+            self._write_lock.notify()
+        else:
+            with self._read_lock:
+                self._read_lock.notify_all()
+        self._write_lock.release()
+
+    class ReadLock:
+        def __init__(self, rw_lock: "RWLock"):
+            self.rw_lock = rw_lock
+
+        def __enter__(self):
+            self.rw_lock.acquire_read()
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            self.rw_lock.release_read()
+
+    def read_lock(self):
+        return self.ReadLock(self)
+
+    class WriteLock:
+        def __init__(self, rw_lock: "RWLock"):
+            self.rw_lock = rw_lock
+
+        def __enter__(self):
+            self.rw_lock.acquire_write()
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            self.rw_lock.release_write()
+
+    def write_lock(self):
+        return self.WriteLock(self)
+
+
+BPTLock = RWLock()
 
 class _KeyDataPair:
     def __init__(
@@ -410,7 +481,6 @@ class InternalNode(_Node):
         next_node = InternalNode(
             self.tree,
         )
-        _o_len = self._key_num
         key_index = self.tree.half_full + 1
         while 1:
             try:
@@ -437,20 +507,12 @@ class InternalNode(_Node):
         """
         if not self.parent or self.parent._key_num == 1:
             return
-        # if self._key_on_parent == 0:
-        #     previous_node = None
-        # else:
-        #     previous_node = self.parent[self._key_on_parent - 1]
         previous_node = None
         if (
                 self.previous_node is not None
                 and self.previous_node.parent is self.parent
         ):
             previous_node = self.previous_node
-        # if self._key_on_parent == self.parent._key_num - 1:
-        #     next_node = None
-        # else:
-        #     next_node = self.parent[self._key_on_parent + 1]
         next_node = None
         if (
                 self.next_node is not None
@@ -537,19 +599,19 @@ class LeafageNode(_Node):
                     "The number of child nodes exceeds "
                     "the maximum number of keys"
                 )
-            for _kdp in datas:
-                if not isinstance(_kdp, _KeyDataPair):
-                    if isinstance(_kdp, dict):
-                        _kdp = tuple(_kdp.items())[0]
-                    _kdp = _KeyDataPair(
-                        leafage=self, key=_kdp[0], data=_kdp[1],
+            for kdp in datas:
+                if not isinstance(kdp, _KeyDataPair):
+                    if isinstance(kdp, dict):
+                        kdp = tuple(kdp.items())[0]
+                    kdp = _KeyDataPair(
+                        leafage=self, key=kdp[0], data=kdp[1],
                     )
                 else:
-                    _kdp.leafage = self
+                    kdp.leafage = self
                 setattr(
                     self,
                     f"_key_{self._key_num}",
-                    _kdp
+                    kdp
                 )
                 self._key_num += 1
         if self.tree.root is None:
@@ -704,20 +766,12 @@ class LeafageNode(_Node):
         找到距离最近的邻近叶子节点，合并过去，从上级内部节点删除合并前位于右边的叶子节点
         """
         key_num = self._key_num
-        # if self._key_on_internal == 0:
-        #     previous_leafage = None
-        # else:
-        #     previous_leafage = self.internal[self._key_on_internal - 1]
         previous_leafage = None
         if (
                 self.previous_node is not None
                 and self.previous_node.internal is self.internal
         ):
             previous_leafage = self.previous_node
-        # if self._key_on_internal == self.internal._key_num - 1:
-        #     next_leafage = None
-        # else:
-        #     next_leafage = self.internal[self._key_on_internal + 1]
         next_leafage = None
         if (
             self.next_node is not None
@@ -842,11 +896,11 @@ class BPTree:
         return node
 
     def nearest_search(self, key: int) -> LeafageNode:
-        with BPTLock:
+        with BPTLock.read_lock():
             return self._nearest_search(key)
 
     def range_query(self, start: int, end: int) -> deque[tuple]:
-        with BPTLock:
+        with BPTLock.read_lock():
             datas = deque()
             leafage = self._nearest_search(start)
             while 1:
@@ -862,7 +916,7 @@ class BPTree:
             return datas
 
     def get(self, key: int) -> Any:
-        with BPTLock:
+        with BPTLock.write_lock():
             leafage = self._nearest_search(key)
             key_index = b(leafage, key)
             if (_kdp := leafage[key_index]) != key:
@@ -874,7 +928,7 @@ class BPTree:
             return _kdp.data
 
     def insert(self, key: int, data):
-        with BPTLock:
+        with BPTLock.write_lock():
             if self.root:
                 leafage = self._nearest_search(key)
                 leafage.add_data(key, data)
@@ -887,22 +941,19 @@ class BPTree:
             return leafage
 
     def remove(self, key: int):
-        with BPTLock:
+        with BPTLock.write_lock():
             leafage = self._nearest_search(key)
-            _olen = leafage._key_num
             leafage.remove_data(key)
-            assert _olen == leafage._key_num + 1
             leafage.balanced()
             self._key_num -= 1
 
     def update(self, key: int, data):
-        with BPTLock:
+        with BPTLock.write_lock():
             leafage = self._nearest_search(key)
             leafage.update_data(key, data)
 
     def __len__(self):
-        with BPTLock:
-            return self._key_num
+        return self._key_num
 
 
     def __bool__(self):
@@ -932,22 +983,21 @@ class BPTree:
             file_path = Path(file_path)
         s = "BPTBranchingFactor:".encode("utf-8")
         s += bpt.branching_factor.to_bytes(8, "big")
-        with BPTLock:
-            if not bpt.root:
-                raise RuntimeError("Empty Tree")
-            node = bpt.root
-            while 1:
-                if isinstance(node, LeafageNode):
-                    break
-                node = node[0]
-            while node is not None:
-                for kdp in node:
-                    d = data_to_bytes(kdp.data)
-                    k = kdp.key.to_bytes(32, "big")
-                    d = len(d).to_bytes(32, "big") + k + d
-                    s += d
-                node = node.next_node
-            file_path.write_bytes(s)
+        if not bpt.root:
+            raise RuntimeError("Empty Tree")
+        node = bpt.root
+        while 1:
+            if isinstance(node, LeafageNode):
+                break
+            node = node[0]
+        while node is not None:
+            for kdp in node:
+                d = data_to_bytes(kdp.data)
+                k = kdp.key.to_bytes(32, "big")
+                d = len(d).to_bytes(32, "big") + k + d
+                s += d
+            node = node.next_node
+        file_path.write_bytes(s)
 
     @staticmethod
     def load(
@@ -973,8 +1023,8 @@ class BPTree:
         while s:
             l, k = s[:32], s[32:64]
             l = int.from_bytes(l, "big")
-            b, s = s[64:64 + l], s[64+l:]
+            d, s = s[64:64 + l], s[64+l:]
             k = int.from_bytes(k, "big")
-            data = bytes_to_data(b)
+            data = bytes_to_data(d)
             bpt.insert(k, data)
         return bpt
