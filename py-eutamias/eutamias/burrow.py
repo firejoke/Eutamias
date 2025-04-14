@@ -7,7 +7,7 @@ import fcntl
 import io
 from collections import deque
 from collections.abc import (
-    Collection, Hashable, Iterable, MutableMapping, Generator, Callable,
+    Collection, Generator,
 )
 from logging import getLogger
 from pathlib import Path
@@ -21,15 +21,14 @@ else:
 
 from gaterpc.core import Context, Service, Worker
 from gaterpc.utils import (
-    LazyAttribute, MsgPackError, from_bytes, interface, msg_pack, msg_unpack,
-    Empty, empty,
-    resolve_module_attr, to_bytes,
+    LazyAttribute, interface, msg_pack, msg_unpack,
+    resolve_module_attr,
 )
 from .global_settings import Settings
-from .bp_tree import BPTree
+from eutamias.bp_tree import BPTree
 
 from .utils import chestnut_dumps, chestnut_loads, generate_int_digest
-from .exceptions import (
+from eutamias.exceptions import (
     ChestnutExistsError, ChestnutNotFoundError, KeyExistsError,
 )
 
@@ -110,8 +109,7 @@ class Chestnuts:
             if self._index_file.exists():
                 self._index = BPTree.load(self._index_file, msg_unpack)
             else:
-                # TODO: 计算最优阶数？
-                self._index = BPTree(Settings.BURROW_BPT_INDEX_ORDER)
+                self._index = BPTree(Settings.BPT_FACTOR)
         self.file.seek(0, io.SEEK_END)
         self._FILE_END_INDEX = self.file.tell()
         self.file.seek(0)
@@ -316,10 +314,6 @@ class Chestnuts:
 
     def create(self, key, value):
         ki = generate_int_digest(key.encode("utf-8"))
-        if self._index:
-            index_node = self._index.nearest_search(ki)
-            if ki in index_node.keys:
-                raise KeyExistsError(key)
         data = {
             "key": key,
             "value": value,

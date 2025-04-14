@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # Author      : ShiFan
 # Created Date: 2024/2/15 11:01
+import math
 from pathlib import Path
 import zmq.constants as z_const
 
@@ -41,7 +42,7 @@ class _Settings:
         ) if p is empty else ensure_mkdir(p),
         process=lambda instance, p: TypeValidator(Path)(p)
     )
-    BURROW_BPT_INDEX_ORDER: int = 100
+    BPT_FACTOR =  math.ceil(100000 ** (1/3))
 
     CHESTNUTS: Path = None
     CHESTNUT_MAX_VERSION = 100

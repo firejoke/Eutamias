@@ -3,13 +3,11 @@
 # Created Date: 2024/8/1 下午3:20
 import asyncio
 import sys
-from lib2to3.fixes.fix_input import context
 from logging import getLogger
 from multiprocessing import Process
 from traceback import format_exception
 from pathlib import Path
 import zmq.auth
-import zmq.constants as z_const
 
 
 base_path = Path(__file__).parent
@@ -17,10 +15,10 @@ base_path = Path(__file__).parent
 sys.path.append(base_path.parent.as_posix())
 
 from gaterpc.core import AMajordomo, AsyncZAPService, Client, Context
-from gaterpc.utils import LazyAttribute, check_socket_addr
+from gaterpc.utils import check_socket_addr
 from gaterpc.global_settings import Settings
-from eutamias.burrow import Chestnut, WAL, BurrowWorker, BurrowService
-from eutamias.core import Eutamias
+from eutamias import WAL, BurrowWorker, BurrowService
+from eutamias import Eutamias
 import test_settings
 
 

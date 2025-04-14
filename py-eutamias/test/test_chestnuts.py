@@ -15,7 +15,7 @@ base_path = Path(__file__).parent
 
 sys.path.append(base_path.parent.as_posix())
 
-from eutamias.global_settings import Settings
+from eutamias import Settings
 from eutamias.burrow import Chestnuts
 import test_settings
 
@@ -42,9 +42,9 @@ def batch():
                 _ = c[key]
                 get_t = time.time() - get_t
                 get_avg, _kn = (get_avg * _kn + get_t) / (_kn + 1), _kn + 1
-        print(f"get avg: {get_avg}")
+        print(f"get avg({_kn}): {get_avg}")
     else:
-        i = 100000
+        i = 10000
         set_avg = 0
         _kn = 0
         with open(keys, "a") as f:
@@ -78,7 +78,7 @@ def batch():
                 set_t = time.time() - set_t
                 set_avg, _kn = (set_avg * _kn + set_t) / (_kn + 1), _kn + 1
                 f.write(key + "\n")
-        print(f"set avg: {set_avg}")
+        print(f"set avg({_kn}): {set_avg}")
 
 
 if __name__ == "__main__":

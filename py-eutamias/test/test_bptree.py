@@ -9,8 +9,6 @@ import secrets
 import sys
 import time
 from pathlib import Path
-from queue import  Queue
-from threading import Thread
 
 from gaterpc.utils import msg_pack, msg_unpack
 
@@ -19,7 +17,7 @@ base_path = Path(__file__).parent
 sys.path.append(base_path.parent.as_posix())
 
 
-from eutamias.global_settings import Settings
+from eutamias import Settings
 import test_settings
 
 
@@ -27,7 +25,7 @@ Settings.configure("USER_SETTINGS", test_settings)
 Settings.setup()
 
 
-from eutamias.bp_tree import BPTree, InternalNode, LeafageNode
+from eutamias.bp_tree import BPTree, InternalNode
 
 
 class Seq:
@@ -110,6 +108,9 @@ def _rm(bpt, q, name):
 
 
 def test_concurrent():
+    from queue import Queue
+    from threading import Thread
+
     bpt_dump = base_path.joinpath("bpt.dump")
     bpt_key = base_path.joinpath("bpt_key.txt")
     bpt = BPTree.load(bpt_dump, msg_unpack)
@@ -135,6 +136,15 @@ def test_concurrent():
     t4.join()
 
 
+def test_key_insert(k):
+    bpt_dump = base_path.joinpath("bpt.dump")
+    bpt = BPTree.load(bpt_dump, msg_unpack)
+    k = int(k)
+    data = secrets.token_hex()
+    leafage = bpt.nearest_search(k)
+    leafage.add_data(k, data)
+
+
 def test_load():
     bpt_dump = base_path.joinpath("bpt.dump")
     bpt_key = base_path.joinpath("bpt_key.txt")
@@ -153,6 +163,10 @@ def test_load():
             gtime[1] = (gtime[1] * gtime[3] + ut) / (gtime[3] + 1)
             gtime[3] += 1
     logger.info(f"bptgtime: {gtime}")
+    BPTree.dump(
+        bpt, bpt_dump,
+        msg_pack
+    )
 
 
 def test(key_num: int, dump=True):
@@ -162,7 +176,7 @@ def test(key_num: int, dump=True):
     bpt_dump = base_path.joinpath("bpt.dump")
     if dump:
         bpt_key = base_path.joinpath("bpt_key.txt")
-        bpt_key.unlink()
+        bpt_key.unlink(missing_ok=True)
         bpt_key = bpt_key.open("a+")
     else:
         bpt_key = None
@@ -310,6 +324,10 @@ if __name__ == '__main__':
         test_load()
     elif argv[0] == "concurrent":
         test_concurrent()
+    elif argv[0] == "insert":
+        test_key_insert(argv[1])
+    elif len(argv) > 1:
+        print("batch key_num run_num, load, concurrent")
     else:
         dct, dgt, drt, bptct, bptgt, bptrt = test(int(argv[0]))
         logger.info(f"dctime: {dct}")

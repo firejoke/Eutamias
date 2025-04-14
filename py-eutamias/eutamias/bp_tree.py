@@ -8,10 +8,10 @@ from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Callable, Iterable
 from pathlib import Path
-from threading import Lock, RLock, Condition
+from threading import Condition
 from typing import Any, Optional, Union, overload
 
-from .exceptions import KeyExistsError
+from eutamias.exceptions import KeyExistsError
 
 
 logger = logging.getLogger(__name__)
@@ -24,7 +24,7 @@ def b(a, x):
         if a[mid] < x: lo = mid + 1
         elif a[mid] == x: return mid
         else: hi = mid
-    return hi
+    return lo
 
 
 def b_1(a, x):
@@ -669,7 +669,7 @@ class LeafageNode(_Node):
             key_index = 0
         else:
             key_index = b(self, key)
-            if key_index and key == getattr(self, f"_key_{key_index - 1}"):
+            if key == getattr(self, f"_key_{key_index}"):
                 raise KeyExistsError(key)
         if kdp is None:
             kdp = _KeyDataPair(self, key, data)
@@ -698,10 +698,7 @@ class LeafageNode(_Node):
                 key_index = 0
         else:
             key_index = b(self, key)
-            if key_index < 0:
-                raise KeyError(f"{key} not in {self}!")
-            kdp = getattr(self, f"_key_{key_index}")
-            if key != kdp:
+            if key != (kdp := getattr(self, f"_key_{key_index}")):
                 raise KeyError(f"{key} != {kdp}({self}[{key_index}])")
         kdp.leafage = None
         end_index = self._key_num - 1
@@ -723,13 +720,10 @@ class LeafageNode(_Node):
     def update_data(self, key: int, data):
         if key == getattr(self, f"_key_{self._key_num - 1}"):
             key_index = self._key_num - 1
+        elif key == getattr(self, "_key_0"):
+            key_index = 0
         else:
-            if key == getattr(self, "_key_0"):
-                key_index = 0
-            else:
-                key_index = b(self, key)
-                if key_index < 0:
-                    raise KeyError(key)
+            key_index = b(self, key)
         kdp = getattr(self, f"_key_{key_index}")
         kdp.data = data
         if key_index == 0:
@@ -971,7 +965,7 @@ class BPTree:
 
     @staticmethod
     def dump(
-        bpt, file_path: Union[Path, str], data_to_bytes: Callable[Any, bytes]
+        bpt, file_path: Union[Path, str], data_to_bytes: Callable[..., bytes]
     ):
         """
         持久化
@@ -981,6 +975,7 @@ class BPTree:
         """
         if isinstance(file_path, str):
             file_path = Path(file_path)
+        file_path.unlink(missing_ok=True)
         s = "BPTBranchingFactor:".encode("utf-8")
         s += bpt.branching_factor.to_bytes(8, "big")
         if not bpt.root:
@@ -990,19 +985,20 @@ class BPTree:
             if isinstance(node, LeafageNode):
                 break
             node = node[0]
-        while node is not None:
-            for kdp in node:
-                d = data_to_bytes(kdp.data)
-                k = kdp.key.to_bytes(32, "big")
-                d = len(d).to_bytes(32, "big") + k + d
-                s += d
-            node = node.next_node
-        file_path.write_bytes(s)
+        with file_path.open("ab+") as f:
+            f.write(s)
+            while node is not None:
+                for kdp in node:
+                    d = data_to_bytes(kdp.data)
+                    k = kdp.key.to_bytes(32, "big")
+                    d = len(d).to_bytes(32, "big") + k + d
+                    f.write(d)
+                node = node.next_node
 
     @staticmethod
     def load(
         file_path: Union[Path, str],
-        bytes_to_data: Callable[bytes, Any]
+        bytes_to_data: Callable[..., Any]
     ) -> "BPTree":
         """
         从文件加载
@@ -1011,20 +1007,23 @@ class BPTree:
         """
         if isinstance(file_path, str):
             file_path = Path(file_path)
-        s = file_path.read_bytes()
-        head, s = s[:27], s[27:]
-        head, branching_factor = head[:19], head[19:]
-        head = head.decode("utf-8")
-        if head != "BPTBranchingFactor:":
-            raise TypeError("Not a BPTree")
-        branching_factor = int.from_bytes(branching_factor, "big")
-        logger.debug(f"BPT head: {head} branching_factor: {branching_factor}")
-        bpt = BPTree(branching_factor)
-        while s:
-            l, k = s[:32], s[32:64]
-            l = int.from_bytes(l, "big")
-            d, s = s[64:64 + l], s[64+l:]
-            k = int.from_bytes(k, "big")
-            data = bytes_to_data(d)
-            bpt.insert(k, data)
+        with file_path.open("rb") as f:
+            end = f.seek(0, 2)
+            f.seek(0)
+            head = f.read(27)
+            head, branching_factor = head[:19], head[19:]
+            head = head.decode("utf-8")
+            if head != "BPTBranchingFactor:":
+                raise TypeError("Not is BPTree")
+            branching_factor = int.from_bytes(branching_factor, "big")
+            logger.debug(f"BPT head: {head} branching_factor: {branching_factor}")
+            bpt = BPTree(branching_factor)
+            while f.tell() != end:
+                l = f.read(32)
+                k = f.read(32)
+                l = int.from_bytes(l, "big")
+                d = f.read(l)
+                k = int.from_bytes(k, "big")
+                data = bytes_to_data(d)
+                bpt.insert(k, data)
         return bpt
