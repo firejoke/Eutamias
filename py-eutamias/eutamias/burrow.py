@@ -5,6 +5,7 @@ import asyncio
 import bisect
 import fcntl
 import io
+import os
 from collections import deque
 from collections.abc import (
     Collection, Generator,
@@ -25,10 +26,13 @@ from gaterpc.utils import (
     resolve_module_attr,
 )
 from .global_settings import Settings
-from eutamias.bp_tree import BPTree
+from .bp_tree import BPTree
 
-from .utils import chestnut_dumps, chestnut_loads, generate_int_digest
-from eutamias.exceptions import (
+from .utils import (
+    FNLock, RWLock, chestnut_dumps, chestnut_loads,
+    key_digest,
+)
+from .exceptions import (
     ChestnutExistsError, ChestnutNotFoundError, KeyExistsError,
 )
 
@@ -71,18 +75,21 @@ class Chestnuts:
     BLOCK_SIZE = 4096
     DELETE_FLAG = (1).to_bytes(1, byteorder="big")
     ADDR_BIT = 64
-    _ADDR_BYTE_LENGTH = ((2**ADDR_BIT).bit_length() + 7) // 8
-    BLOCK_HEAD_FORMAT = (
+    _ADDR_BYTE_LENGTH = ((2**ADDR_BIT - 1).bit_length() + 7) // 8
+    BLOCK_HEAD_LIMIT = (
         _ADDR_BYTE_LENGTH,
         _ADDR_BYTE_LENGTH,
+        1, # 预留一个
+        len(DELETE_FLAG),
         ((BLOCK_SIZE - 2 * _ADDR_BYTE_LENGTH).bit_length() + 7) // 8
     )
-    BLOCK_HEAD_SIZE = sum(BLOCK_HEAD_FORMAT)
+    BLOCK_HEAD_SIZE = sum(BLOCK_HEAD_LIMIT)
     # TODO: 缓存多少个？
     _CACHE: dict[str, Chestnut] = dict()
     medata = LazyAttribute(
         render=lambda instance, raw:
-        f"Eutamias {instance.VERSION} {instance.latest_addr}"
+        f"Eutamias {instance.VERSION} {instance.latest_addr} "
+        f"BlockHead{instance.BLOCK_HEAD_LIMIT}"
     )
 
     def __init__(self, index: BPTree=None):
@@ -91,17 +98,11 @@ class Chestnuts:
         self._index_file = None
         self.reuse_block_index: deque[int] = deque()
         self.ready = asyncio.Future()
-        self.io_lock = TLock()
-        self.file = io.open(
+        self.fn_lock = FNLock()
+        self._FILE_END_INDEX = os.stat(Settings.CHESTNUTS).st_size
+        self.file = open(
             Settings.CHESTNUTS, mode="rb+", buffering=0
         )
-        try:
-            fcntl.flock(self.file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as e:
-            self.file.close()
-            self.file = None
-            logger.error(f"open {Settings.CHESTNUTS}: {e}")
-            raise
         if index:
             self._index = index
         else:
@@ -110,11 +111,9 @@ class Chestnuts:
                 self._index = BPTree.load(self._index_file, msg_unpack)
             else:
                 self._index = BPTree(Settings.BPT_FACTOR)
-        self.file.seek(0, io.SEEK_END)
-        self._FILE_END_INDEX = self.file.tell()
-        self.file.seek(0)
         medata = self._read(0).strip(self.FILL_BYTE)
         medata = medata.decode("utf-8")
+        logger.info(f"medata: {medata}")
         try:
             _, self.VERSION, self.latest_addr, *param = medata.split()
             self.latest_addr = int(self.latest_addr)
@@ -131,76 +130,90 @@ class Chestnuts:
     def _close_file(self):
         if self.ready.done():
             self.ready = asyncio.Future()
+        self._update_metadata()
         if self.file:
             self.file.flush()
-            try:
-                fcntl.flock(self.file, fcntl.LOCK_UN)
-            except ValueError:
-                pass
-            finally:
-                self.file.close()
-                self.file = None
+            self.file.close()
+            self.file = None
         if self._index_file and self._index.root:
             BPTree.dump(self._index, self._index_file, msg_pack)
 
     def _read(self, addr):
-        self.file.seek(addr)
-        data = self.file.read(self.BLOCK_SIZE)
-        return data
+        with self.fn_lock.read_lock(self.file, addr, self.BLOCK_SIZE):
+            self.file.seek(addr)
+            data = self.file.read(self.BLOCK_SIZE)
+            return data
 
     def _write(self, addr, data):
         if not isinstance(data, bytes):
             raise TypeError(data)
-
-        self.file.seek(addr)
-        self.file.write(data)
-        self.file.flush()
+        if len(data) != self.BLOCK_SIZE:
+            raise ValueError(f"len of data: {len(data)}")
+        with self.fn_lock.write_lock(self.file, addr, len(data)):
+            self.file.seek(addr)
+            self.file.write(data)
+            self.file.flush()
 
     def _update_metadata(self):
-        with self.io_lock:
+        with self.fn_lock.write_lock(self.file, 0, self.BLOCK_SIZE):
             self.file.seek(0)
             self.file.write(
-                self.medata.encode("utf-8").center(self.BLOCK_SIZE, self.FILL_BYTE)
+                self.medata.encode("utf-8").ljust(
+                    self.BLOCK_SIZE, self.FILL_BYTE
+                )
             )
             self.file.flush()
 
-    def _get_block(self, index) -> tuple[int, int, bytes]:
+    def _get_block(self, index) -> tuple[int, int, int, int, bytes]:
         data = self._read(index)
+        if len(data) != self.BLOCK_SIZE:
+            return 0, 0, 0, 0, b""
         head, data = data[:self.BLOCK_HEAD_SIZE], data[self.BLOCK_HEAD_SIZE:]
-        pre_index = head[0: self.BLOCK_HEAD_FORMAT[0]]
+        pre_index = head[0: self.BLOCK_HEAD_LIMIT[0]]
         post_index = head[
-            self.BLOCK_HEAD_FORMAT[0]:
-            self.BLOCK_HEAD_FORMAT[0] +
-            self.BLOCK_HEAD_FORMAT[1]
+            self.BLOCK_HEAD_LIMIT[0]:
+            self.BLOCK_HEAD_LIMIT[0] +
+            self.BLOCK_HEAD_LIMIT[1]
+        ]
+        _flag = head[
+            self.BLOCK_HEAD_LIMIT[0] +
+            self.BLOCK_HEAD_LIMIT[1]
+        ]
+        del_flag = head[
+            self.BLOCK_HEAD_LIMIT[0] +
+            self.BLOCK_HEAD_LIMIT[1] +
+            self.BLOCK_HEAD_LIMIT[2]
         ]
         data_size = head[
-            self.BLOCK_HEAD_FORMAT[0] +
-            self.BLOCK_HEAD_FORMAT[1]:
-            self.BLOCK_HEAD_FORMAT[0] +
-            self.BLOCK_HEAD_FORMAT[1] +
-            self.BLOCK_HEAD_FORMAT[2]
+            self.BLOCK_HEAD_LIMIT[0] +
+            self.BLOCK_HEAD_LIMIT[1] +
+            self.BLOCK_HEAD_LIMIT[2] +
+            self.BLOCK_HEAD_LIMIT[3]:
+            self.BLOCK_HEAD_LIMIT[0] +
+            self.BLOCK_HEAD_LIMIT[1] +
+            self.BLOCK_HEAD_LIMIT[2] +
+            self.BLOCK_HEAD_LIMIT[3] +
+            self.BLOCK_HEAD_LIMIT[4]
         ]
         pre_index = int.from_bytes(pre_index, byteorder="big")
         post_index = int.from_bytes(post_index, byteorder="big")
         data_size = int.from_bytes(data_size, byteorder="big")
         data = data[:data_size]
-        return pre_index, post_index, data
+        return pre_index, post_index, _flag, del_flag, data
 
     def _save_block(
         self, block: bytes, index, pre_index: int =0, post_index: int =0
     ):
-        data_size = len(block).to_bytes(4, "big")
+        data_size = len(block).to_bytes(self.BLOCK_HEAD_LIMIT[4], "big")
         data = block.ljust(
             self.BLOCK_SIZE - self.BLOCK_HEAD_SIZE, self.FILL_BYTE
         )
         if len(data) > self.BLOCK_SIZE:
             raise ValueError(f"len of data: {len(data)}")
-        pre_index = pre_index.to_bytes(8, "big")
-        post_index = post_index.to_bytes(8, "big")
-        self._write(
-            index,
-            pre_index + post_index + data_size + data
-        )
+        pre_index = pre_index.to_bytes(self.BLOCK_HEAD_LIMIT[0], "big")
+        post_index = post_index.to_bytes(self.BLOCK_HEAD_LIMIT[1], "big")
+        head = pre_index + post_index + self.FILL_BYTE + self.FILL_BYTE + data_size
+        self._write(index, head + data)
 
     def _recycle_addr(self, addr):
         bisect.insort_left(self.reuse_block_index, addr)
@@ -208,34 +221,39 @@ class Chestnuts:
         # self.reuse_block_index.sort(reverse=True)
 
     def _clear_block(self, addr):
-        self.file.seek(addr)
-        self.file.write(self.FILL_BYTE * self.BLOCK_SIZE)
-        self.file.flush()
+        self._write(addr, self.FILL_BYTE * self.BLOCK_SIZE)
 
-    def _soft_delete(self, addr):
-        self.file.seek(addr)
-        self.file.write(self.DELETE_FLAG)
+    def _mark_delete(self, block_addr):
+        # TODO 标记删除
+        addr = block_addr - (
+                self.BLOCK_HEAD_LIMIT[0] + self.BLOCK_HEAD_LIMIT[1]
+                + self.BLOCK_HEAD_LIMIT[2]
+        )
+        with self.fn_lock.write_lock(self.file, addr, 1):
+            self.file.seek(addr)
+            self.file.write(self.DELETE_FLAG)
+            self.file.flush()
 
     def _search_chestnut_block(
         self, index: int
-    ) -> Union[None, tuple[dict, list[int]]]:
+    ) -> Union[None, tuple[dict, tuple[int]]]:
         """
         从Chestnut任意块的索引找到该Chestnut的所有块
         """
-        pre_index, post_index, data = self._get_block(index)
+        pre_index, post_index, _, del_flag, data = self._get_block(index)
         # logger.debug(f"{pre_index} {post_index} {data}")
         if len(data) == 0:
             self._recycle_addr(index)
             return None
-        data_indices = [index,]
+        data_indices = (index,)
         while pre_index or post_index:
             if pre_index:
-                data_indices = [pre_index, *data_indices]
-                pre_index, _, pre_data = self._get_block(pre_index)
+                data_indices = (pre_index, *data_indices)
+                pre_index, _, _, _, pre_data = self._get_block(pre_index)
                 data = pre_data + data
             if post_index:
-                data_indices = [*data_indices, post_index]
-                _, post_index, post_data = self._get_block(post_index)
+                data_indices = (*data_indices, post_index)
+                _, post_index, _, _, post_data = self._get_block(post_index)
                 data += post_data
         data = chestnut_loads(data)
         return data, data_indices
@@ -245,47 +263,45 @@ class Chestnuts:
         for index in indices:
             if isinstance(index, str) and index.isdigit():
                 index = int(index)
-            elif not isinstance(index, int):
+            if not isinstance(index, int):
                 raise TypeError("index must be integer")
-            _pr, _po, _data = self._get_block(index)
+            _data = self._get_block(index)[-1]
             data += _data
         data = chestnut_loads(data)
         return data
 
     def _write_chestnut_block(self, chestnut_block) -> list[int]:
         blocks = list()
-        with self.io_lock:
-            start = 0
-            while len(
-                    block := chestnut_block[
-                             start:self.BLOCK_SIZE - self.BLOCK_HEAD_SIZE
-                             ]
-            ):
-                if self.reuse_block_index:
-                    index = self.reuse_block_index.popleft()
-                else:
-                    index = self.latest_addr
-                    self.latest_addr += self.BLOCK_SIZE
-                if blocks:
-                    pre_index = blocks[-1][1]
-                    blocks[-1][3] = index
-                else:
-                    pre_index = 0
-                blocks.append([block, index, pre_index, 0])
-                start += self.BLOCK_SIZE - self.BLOCK_HEAD_SIZE
-            for block in blocks:
-                # logger.debug(block)
-                self._save_block(*block)
+        start = 0
+        while len(
+                block := chestnut_block[
+                    start:(end := start + self.BLOCK_SIZE - self.BLOCK_HEAD_SIZE)
+                ]
+        ):
+            if self.reuse_block_index:
+                index = self.reuse_block_index.popleft()
+            else:
+                index = self.latest_addr
+                self.latest_addr += self.BLOCK_SIZE
+            if blocks:
+                pre_index = blocks[-1][1]
+                blocks[-1][3] = index
+            else:
+                pre_index = 0
+            blocks.append([block, index, pre_index, 0])
+            start = end
+        for block in blocks:
+            # logger.debug(block)
+            self._save_block(*block)
         block_indices = [i[1] for i in blocks]
         return block_indices
 
     def _clear_chestnut_block(self, indices: list[int]):
-        with self.io_lock:
-            for index in indices:
-                self._clear_block(index)
+        for index in indices:
+            self._clear_block(index)
 
     def load(self):
-        with self.io_lock:
+        with self.fn_lock.read_lock(self.file):
             index = self.BLOCK_SIZE
             read = deque()
             while 1:
@@ -294,12 +310,12 @@ class Chestnuts:
                     if _ := self._search_chestnut_block(index):
                         data, indices = _
                         # use B+ Tree
-                        key = generate_int_digest(data["key"].encode("utf-8"))
+                        ki = key_digest.to_int(data["key"])
                         # logger.debug(f"key: {key}")
                         try:
                             self._index.insert(
-                                key,
-                                ",".join(str(i) for i in indices)
+                                ki,
+                                indices
                             )
                         except KeyExistsError:
                             pass
@@ -313,7 +329,7 @@ class Chestnuts:
                 index += self.BLOCK_SIZE
 
     def create(self, key, value):
-        ki = generate_int_digest(key.encode("utf-8"))
+        ki = key_digest.to_int(key)
         data = {
             "key": key,
             "value": value,
@@ -322,16 +338,14 @@ class Chestnuts:
         chestnut_block = chestnut_dumps(data)
         block_indices = self._write_chestnut_block(chestnut_block)
         chestnut = Chestnut(index=block_indices, **data)
-        # use B+Tree
-        # logger.debug(f"key int digest: {key}")
         self._index.insert(
-            ki, ",".join(str(i) for i in block_indices)
+            ki, block_indices
         )
         return chestnut
 
     def update(self, key, value):
-        ki = generate_int_digest(key.encode("utf-8"))
-        block_indices = self._index.get(ki).split(",")
+        ki = key_digest.to_int(key)
+        block_indices = self._index.get(ki)
         data = self._read_chestnut_blocks(block_indices)
         chestnut = Chestnut(index=block_indices, **data)
         data.update(
@@ -346,19 +360,19 @@ class Chestnuts:
         block_indices = self._write_chestnut_block(new_chestnut_blocks)
         chestnut = Chestnut(index=block_indices, **data)
         self._index.update(
-            ki, ",".join(str(i) for i in block_indices)
+            ki, block_indices
         )
         return chestnut
 
     def get(self, key):
-        ki = generate_int_digest(key.encode("utf-8"))
-        block_indices = self._index.get(ki).split(",")
+        ki = key_digest.to_int(key)
+        block_indices = self._index.get(ki)
         data = self._read_chestnut_blocks(block_indices)
         return Chestnut(index=block_indices, **data)
 
     def delete(self, key):
-        ki = generate_int_digest(key.encode("utf-8"))
-        block_indices = self._index.get(ki).split(",")
+        ki = key_digest.to_int(key)
+        block_indices = self._index.get(ki)
         self._clear_chestnut_block(block_indices)
         self._index.remove(ki)
 
