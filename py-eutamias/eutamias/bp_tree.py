@@ -8,10 +8,10 @@ from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Callable, Iterable
 from pathlib import Path
-from threading import Condition
 from typing import Any, Optional, Union, overload
 
-from eutamias.exceptions import KeyExistsError
+from .exceptions import KeyExistsError
+from .utils import RWLock
 
 
 logger = logging.getLogger(__name__)
@@ -37,78 +37,8 @@ def b_1(a, x):
     return hi - 1 if hi else hi
 
 
-class RWLock:
-    _read_lock = Condition()
-    _write_lock = Condition()
-    readers = 0
-    waiting_writers = 0
-    waiting_readers = 0
-    writing = False
-
-    def acquire_read(self):
-        self._read_lock.acquire()
-        self.waiting_readers += 1
-        self._read_lock.wait_for(
-            lambda : not self.waiting_writers or not self.writing
-        )
-        self.waiting_readers -= 1
-        self.readers += 1
-
-    def release_read(self):
-        self.readers -= 1
-        if not self.readers:
-            with self._write_lock:
-                self._write_lock.notify()
-        self._read_lock.release()
-
-    def acquire_write(self):
-        self._write_lock.acquire()
-        self.waiting_writers += 1
-        self._write_lock.wait_for(
-            lambda : not self.readers or not self.writing
-        )
-        self.waiting_writers -= 1
-        self.writing = True
-
-    def release_write(self):
-        self.writing = False
-        if self.waiting_writers:
-            self._write_lock.notify()
-        else:
-            with self._read_lock:
-                self._read_lock.notify_all()
-        self._write_lock.release()
-
-    class ReadLock:
-        def __init__(self, rw_lock: "RWLock"):
-            self.rw_lock = rw_lock
-
-        def __enter__(self):
-            self.rw_lock.acquire_read()
-            return self
-
-        def __exit__(self, exc_type, exc_val, exc_tb):
-            self.rw_lock.release_read()
-
-    def read_lock(self):
-        return self.ReadLock(self)
-
-    class WriteLock:
-        def __init__(self, rw_lock: "RWLock"):
-            self.rw_lock = rw_lock
-
-        def __enter__(self):
-            self.rw_lock.acquire_write()
-            return self
-
-        def __exit__(self, exc_type, exc_val, exc_tb):
-            self.rw_lock.release_write()
-
-    def write_lock(self):
-        return self.WriteLock(self)
-
-
 BPTLock = RWLock()
+
 
 class _KeyDataPair:
     def __init__(
@@ -366,6 +296,7 @@ class InternalNode(_Node):
             self.merge()
         if parent is not None:
             return parent.balanced()
+        return None
 
     def _add_children(self, child: Union["InternalNode", "LeafageNode"]):
         if isinstance(child, InternalNode):
@@ -643,6 +574,7 @@ class LeafageNode(_Node):
             self.merge()
         if internal is not None:
             return internal.balanced()
+        return None
 
     @overload
     def add_data(self, key: int, data) -> int:
