@@ -9,6 +9,8 @@ import sys
 import time
 from logging import getLogger
 from pathlib import Path
+from queue import Queue
+from threading import Thread
 
 
 base_path = Path(__file__).parent
@@ -29,7 +31,110 @@ c = Chestnuts()
 print(f"load chestnuts: {time.time() - _n}")
 
 
-def batch():
+class ExceptionHandlingThread(Thread):
+    def __init__(
+        self, group=None, target=None, name=None, args=(), kwargs={}, *,
+        daemon=None
+    ):
+        super().__init__(
+            group=group, target=target, name=name, args=args, kwargs=kwargs,
+            daemon=daemon
+        )
+        self.exception = None
+
+    def run(self):
+        try:
+            super().run()
+        except Exception as e:
+            self.exception = e
+            raise e
+
+
+def _get(q, name):
+    print(f"get({name}) start")
+    i = 0
+    while 1:
+        k = q.get()
+        if k == "end":
+            print(f"get({name}) end, processed {i}")
+            q.put("end")
+            break
+        i += 1
+        try:
+            v = c[k]
+        except Exception as e:
+            print(f"get({k}) error: {e}")
+            raise e
+        q.task_done()
+
+
+def _create(q, name):
+    print(f"create({name}) start")
+    i = 0
+    while 1:
+        k, v = q.get()
+        if k == "end":
+            print(f"create({name}) end, processed {i}")
+            q.put(("end", ""))
+            break
+        i += 1
+        c.create(k, v)
+        q.task_done()
+
+
+def _delete(q, name, iq=None):
+    print(f"remove({name}) start")
+    i = 0
+    while 1:
+        k = q.get()
+        if k == "end":
+            print(f"remove({name}) end, processed {i}")
+            q.put("end")
+            break
+        i += 1
+        v = c.delete(k, True)
+        q.task_done()
+        if iq is not None:
+            iq.put((k, v))
+
+
+def test_concurrent():
+    keys = Settings.CHESTNUTS.parent.joinpath("test_chestnuts_keys")
+    q = Queue()
+    iq = Queue()
+    b = 1000
+    t1 = ExceptionHandlingThread(target=_get, args=(q, "t1"))
+    t2 = ExceptionHandlingThread(
+        target=_delete, args=(q, "t2"), kwargs={"iq": iq}
+    )
+    t3 = ExceptionHandlingThread(target=_get, args=(q, "t3"))
+    t4 = ExceptionHandlingThread(
+        target=_delete, args=(q, "t4"), kwargs={"iq": iq}
+    )
+    t5 = ExceptionHandlingThread(target=_create, args=(iq, "t5"))
+    t6 = ExceptionHandlingThread(target=_create, args=(iq, "t6"))
+    for t in (t1, t2, t3, t4, t5, t6):
+    # for t in (t1, t3):
+        t.start()
+    with open(keys) as f:
+        for key in f:
+            key = key.strip()
+            q.put(key)
+    q.put("end")
+    t1.join()
+    t2.join()
+    t3.join()
+    t4.join()
+    iq.put(("end", ""))
+    t5.join()
+    t6.join()
+    for t in (t1, t2, t3, t4, t5, t6):
+    # for t in (t1, t3):
+        if t.exception:
+            raise t.exception
+
+
+def test(key_num: int):
     keys = Settings.CHESTNUTS.parent.joinpath("test_chestnuts_keys")
     if keys.exists():
         get_avg = 0
@@ -44,34 +149,17 @@ def batch():
                 get_avg, _kn = (get_avg * _kn + get_t) / (_kn + 1), _kn + 1
         print(f"get avg({_kn}): {get_avg}")
     else:
-        i = 10000
+        i = key_num
         set_avg = 0
         _kn = 0
         with open(keys, "a") as f:
             while i:
                 i -= 1
-                alphabet = string.ascii_letters + string.digits
-                key = "".join(secrets.choice(alphabet) for i in range(8))
-                _1 = "".join(secrets.choice(alphabet) for i in range(10))
-                _2 = "".join(secrets.choice(alphabet) for i in range(20))
-                _3 = "".join(secrets.choice(alphabet) for i in range(30))
-                _4 = "".join(secrets.choice(alphabet) for i in range(40))
-                _5 = "".join(secrets.choice(alphabet) for i in range(50))
-                _6 = "".join(secrets.choice(alphabet) for i in range(60))
-                _7 = "".join(secrets.choice(alphabet) for i in range(70))
-                _8 = "".join(secrets.choice(alphabet) for i in range(80))
-                _9 = "".join(secrets.choice(alphabet) for i in range(90))
-                _10 = "".join(secrets.choice(alphabet) for i in range(100))
+                key = secrets.token_hex()
                 value = {
-                    _1: _10,
-                    _2: {
-                        _9: [_3, _8]
-                    },
-                    _4: {
-                        _7: {
-                            _6: _5
-                        }
-                    }
+                    secrets.token_hex(): secrets.token_hex(),
+                    secrets.token_hex(): [secrets.token_hex() for _ in range(30)],
+                    secrets.token_hex(): {secrets.token_hex(): secrets.token_hex() for _ in range(30)},
                 }
                 set_t = time.time()
                 c.create(key, value)
@@ -113,8 +201,11 @@ del key
     delete_parser = sub_parser.add_parser("del")
     delete_parser.add_argument("key")
     delete_parser.set_defaults(func=c.delete)
-    batch_parser = sub_parser.add_parser("batch")
-    batch_parser.set_defaults(func=batch)
+    once_parser = sub_parser.add_parser("once")
+    once_parser.add_argument("key_num", type=int)
+    once_parser.set_defaults(func=test)
+    concurrent_parser = sub_parser.add_parser("concurrent")
+    concurrent_parser.set_defaults(func=test_concurrent)
     args = parser.parse_args()
     if not hasattr(args, "func"):
         parser.print_help()
