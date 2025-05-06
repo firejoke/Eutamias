@@ -11,30 +11,10 @@ from pathlib import Path
 from typing import Any, Optional, Union, overload
 
 from .exceptions import KeyExistsError
-from .utils import RWLock
+from .utils import RWLock, b, b_1, common_prefix
 
 
 logger = logging.getLogger(__name__)
-
-
-def b(a, x):
-    lo, hi = 0, len(a)
-    while lo < hi:
-        mid = (lo + hi) // 2
-        if a[mid] < x: lo = mid + 1
-        elif a[mid] == x: return mid
-        else: hi = mid
-    return lo
-
-
-def b_1(a, x):
-    lo, hi = 0, len(a)
-    while lo < hi:
-        mid = (lo + hi) // 2
-        if a[mid] < x: lo = mid + 1
-        elif a[mid] == x: return mid
-        else: hi = mid
-    return hi - 1 if hi else hi
 
 
 BPTLock = RWLock()
@@ -44,102 +24,58 @@ class _KeyDataPair:
     def __init__(
         self,
         leafage: "LeafageNode",
-        key: int,
+        key: Union[int, str],
         data: Any,
     ):
         self.leafage = leafage
         self.key = key
         self.data = data
 
-    def __lt__(self, other: Union["_KeyDataPair", int]):
-        if isinstance(other, int):
+    def __lt__(self, other: Union["_KeyDataPair", int, str]):
+        if isinstance(other, (int, str)):
             return self.key < other
         return self.key < other.key
 
-    def __gt__(self, other: Union["_KeyDataPair", int]):
-        if isinstance(other, int):
+    def __gt__(self, other: Union["_KeyDataPair", int, str]):
+        if isinstance(other, (int, str)):
             return self.key > other
         return self.key > other.key
 
-    def __eq__(self, other: Union["_KeyDataPair", int]):
-        if isinstance(other, int):
+    def __eq__(self, other: Union["_KeyDataPair", int, str]):
+        if isinstance(other, (int, str)):
             return self.key == other
         return self.key == other.key
 
-    def __ne__(self, other: Union["_KeyDataPair", int]):
-        if isinstance(other, int):
+    def __ne__(self, other: Union["_KeyDataPair", int, str]):
+        if isinstance(other, (int, str)):
             return self.key != other
         return self.key != other.key
 
-    def __le__(self, other: Union["_KeyDataPair", int]):
-        if isinstance(other, int):
+    def __le__(self, other: Union["_KeyDataPair", int, str]):
+        if isinstance(other, (int, str)):
             return self.key <= other
         return self.key <= other.key
 
-    def __ge__(self, other: Union["_KeyDataPair", int]):
-        if isinstance(other, int):
+    def __ge__(self, other: Union["_KeyDataPair", int, str]):
+        if isinstance(other, (int, str)):
             return self.key >= other
         return self.key >= other.key
 
-    def __add__(self, other: Union["_KeyDataPair", int]):
-        if isinstance(other, int):
-            return self.key + other
-        return self.key + other.key
-
-    def __radd__(self, other: Union["_KeyDataPair", int]):
-        if isinstance(other, int):
-            return other + self.key
-        return other.key + self.key
-
-    def __sub__(self, other: Union["_KeyDataPair", int]):
+    def __sub__(self, other: Union["_KeyDataPair", int, str]):
+        if isinstance(other, _KeyDataPair):
+            other = other.key
         if isinstance(other, int):
             return self.key - other
-        return self.key - other.key
+        cp = common_prefix(self.key, other)
+        return max(len(cp), len(self.key)) - len(cp)
 
-    def __rsub__(self, other: Union["_KeyDataPair", int]):
+    def __rsub__(self, other: Union["_KeyDataPair", int, str]):
+        if isinstance(other, _KeyDataPair):
+            other = other.key
         if isinstance(other, int):
             return other - self.key
-        return other.key - self.key
-
-    def __mul__(self, other: Union["_KeyDataPair", int]):
-        if isinstance(other, int):
-            return self.key * other
-        return self.key * other.key
-
-    def __rmul__(self, other: Union["_KeyDataPair", int]):
-        if isinstance(other, int):
-            return other * self.key
-        return other.key * self.key
-
-    def __truediv__(self, other: Union["_KeyDataPair", int]):
-        if isinstance(other, int):
-            return self.key / other
-        return self.key / other.key
-
-    def __rtruediv__(self, other: Union["_KeyDataPair", int]):
-        if isinstance(other, int):
-            return other / self.key
-        return other.key / self.key
-
-    def __floordiv__(self, other: Union["_KeyDataPair", int]):
-        if isinstance(other, int):
-            return self.key // other
-        return self.key // other.key
-
-    def __rfloordiv__(self, other: Union["_KeyDataPair", int]):
-        if isinstance(other, int):
-            return other // self.key
-        return other.key // self.key
-
-    def __mod__(self, other: Union["_KeyDataPair", int]):
-        if isinstance(other, int):
-            return self.key % other
-        return self.key % other.key
-
-    def __rmod__(self, other: Union["_KeyDataPair", int]):
-        if isinstance(other, int):
-            return other % self.key
-        return other.key % self.key
+        cp = common_prefix(other, self.key)
+        return max(len(cp), len(self.key)) - len(cp)
 
     def __repr__(self):
         return f"<_KeyDataPair {self.key}: {self.data}>"
@@ -149,7 +85,7 @@ class _Node(ABC):
 
     @property
     @abstractmethod
-    def index(self) -> int:
+    def index(self) -> Union[int, str]:
         pass
 
     @index.setter
@@ -157,28 +93,28 @@ class _Node(ABC):
     def index(self, value):
         pass
 
-    def __lt__(self, other: Union["_Node", int]):
-        if isinstance(other, int):
+    def __lt__(self, other: Union["_Node", int, str]):
+        if isinstance(other, (int, str)):
             return self.index < other
         return self.index < other.index
 
-    def __gt__(self, other: Union["_Node", int]):
-        if isinstance(other, int):
+    def __gt__(self, other: Union["_Node", int, str]):
+        if isinstance(other, (int, str)):
             return self.index > other
         return self.index > other.index
 
-    def __eq__(self, other: Union["_Node", int]):
-        if isinstance(other, int):
+    def __eq__(self, other: Union["_Node", int, str]):
+        if isinstance(other, (int, str)):
             return self.index == other
         return self.index == other.index
 
-    def __le__(self, other: Union["_Node", int]):
-        if isinstance(other, int):
+    def __le__(self, other: Union["_Node", int, str]):
+        if isinstance(other, (int, str)):
             return self.index <= other
         return self.index <= other.index
 
-    def __ge__(self, other: Union["_Node", int]):
-        if isinstance(other, int):
+    def __ge__(self, other: Union["_Node", int, str]):
+        if isinstance(other, (int, str)):
             return self.index >= other
         return self.index >= other.index
 
@@ -229,7 +165,10 @@ class InternalNode(_Node):
         self.previous_node = previous_node
         self.next_node = next_node
         self._key_on_parent: int = -1
-        self._index: int = -1
+        if tree.key_type == "int":
+            self._index: int = -1
+        else:
+            self._index: str = ""
         if children:
             if len(children) > self.tree.key_max_num:
                 raise RuntimeError(
@@ -255,15 +194,16 @@ class InternalNode(_Node):
                     child.internal = self
                     child._key_on_internal = i
                 self._key_num += 1
+            self._index = getattr(self, "_key_0").index
         if self.tree.root is None:
             self.tree.root = self
 
     @property
-    def index(self) -> int:
+    def index(self) -> Union[int, str]:
         return self._index
 
     @index.setter
-    def index(self, index: int):
+    def index(self, index: Union[int, str]):
         """
         更新索引
         """
@@ -523,7 +463,10 @@ class LeafageNode(_Node):
         self.previous_node = previous_node
         self.next_node = next_node
         self._key_on_internal: int = -1
-        self._index: int = -1
+        if tree.key_type == "int":
+            self._index: int = -1
+        else:
+            self._index: str = ""
         if datas:
             if len(datas) > self.tree.key_max_num:
                 raise RuntimeError(
@@ -545,15 +488,16 @@ class LeafageNode(_Node):
                     kdp
                 )
                 self._key_num += 1
+            self._index = getattr(self, "_key_0").key
         if self.tree.root is None:
             self.tree.root = self
 
     @property
-    def index(self) -> int:
+    def index(self) -> Union[int, str]:
         return self._index
 
     @index.setter
-    def index(self, index: int):
+    def index(self, index: Union[int, str]):
         """
         更新索引
         """
@@ -577,7 +521,7 @@ class LeafageNode(_Node):
         return None
 
     @overload
-    def add_data(self, key: int, data) -> int:
+    def add_data(self, key: Union[int, str], data) -> int:
         ...
 
     @overload
@@ -585,13 +529,13 @@ class LeafageNode(_Node):
         ...
 
     def add_data(
-        self, key: Optional[int] = -1, data: Optional[Any] = None,
+        self, key: Union[None, int, str] = None, data: Optional[Any] = None,
         *, kdp: Optional[_KeyDataPair] = None,
     ) -> int:
         if kdp is not None:
             key = kdp.key
-        elif key < 0:
-            raise IndexError(key)
+        # elif key < 0:
+        #     raise IndexError(key)
 
         if not self._key_num:
             key_index = 0
@@ -619,7 +563,7 @@ class LeafageNode(_Node):
             self.index = key
         return key_index
 
-    def remove_data(self, k: Union[int, _KeyDataPair]):
+    def remove_data(self, k: Union[int, str, _KeyDataPair]):
         if isinstance(k, _KeyDataPair):
             key = k.key
         else:
@@ -649,7 +593,7 @@ class LeafageNode(_Node):
             else:
                 self.index = -1
 
-    def update_data(self, key: int, data):
+    def update_data(self, key: Union[int, str], data):
         if key == getattr(self, f"_key_{self._key_num - 1}"):
             key_index = self._key_num - 1
         elif key == getattr(self, "_key_0"):
@@ -707,15 +651,21 @@ class LeafageNode(_Node):
         first_kdp = getattr(self, "_key_0")
         latest_kdp = getattr(self, f"_key_{self._key_num - 1}")
         if previous_leafage is None:
-            previous_leafage_latest_kdp = 0
+            if self.tree.key_type == "int":
+                previous_leafage_latest_kdp = 0
+            else:
+                previous_leafage_latest_kdp = ""
         else:
             previous_leafage_latest_kdp = previous_leafage[-1]
         if next_leafage is None:
-            next_leafage_first_kdp = 0
+            if self.tree.key_type == "int":
+                next_leafage_first_kdp = 0
+            else:
+                next_leafage_first_kdp = ""
         else:
             next_leafage_first_kdp = next_leafage[0]
         previous_distance = first_kdp - previous_leafage_latest_kdp
-        next_distance = abs(next_leafage_first_kdp - latest_kdp)
+        next_distance = latest_kdp - next_leafage_first_kdp
 
         if (
                 previous_leafage
@@ -775,7 +725,7 @@ class LeafageNode(_Node):
         if end is not None:
             end = end.key
         s = (
-            f"<{self.NodeType}: "
+            f"<{self.NodeType}({self.index}): "
             f"[{start} ... {end}] "
             f"datas({self._key_num})>"
         )
@@ -784,8 +734,6 @@ class LeafageNode(_Node):
 
 class BPTree:
     """
-    当前线程使用递归锁
-
     branching factor = 3
     half full = ceil((3 + 1) / 2) = floor(3 / 2) + 1 = 2
     min num keys = (half full)
@@ -798,15 +746,17 @@ class BPTree:
     def __init__(
         self,
         branching_factor: int,
+        key_type,
         root_node: Union[InternalNode, LeafageNode, None] = None,
     ):
         self.branching_factor = branching_factor
         self.half_full = math.floor(self.branching_factor / 2) + 1
+        self.key_type = key_type
         self.key_max_num = self.half_full * 2 + 1
         self.root = root_node
         self._key_num = 0
 
-    def _nearest_search(self, key: int) -> LeafageNode:
+    def _nearest_search(self, key: Union[int, str]) -> LeafageNode:
         """
         返回索引键范围包含该键的叶子节点
         """
@@ -821,11 +771,13 @@ class BPTree:
                 break
         return node
 
-    def nearest_search(self, key: int) -> LeafageNode:
+    def nearest_search(self, key: Union[int, str]) -> LeafageNode:
         with BPTLock.read_lock():
             return self._nearest_search(key)
 
-    def range_query(self, start: int, end: int) -> deque[tuple]:
+    def range_query(
+        self, start: Union[int, str], end: Union[int, str]
+    ) -> deque[tuple]:
         with BPTLock.read_lock():
             datas = deque()
             leafage = self._nearest_search(start)
@@ -834,15 +786,32 @@ class BPTree:
                     if start <= kdp <= end:
                         datas.append((kdp.key, kdp.data))
                     if kdp > end:
-                        break
+                        return datas
                 if leafage.next_node is not None:
                     leafage = leafage.next_node
                 else:
                     break
             return datas
 
-    def get(self, key: int) -> Any:
-        with BPTLock.write_lock():
+    def startswith(self, start: str) -> deque[tuple]:
+        with BPTLock.read_lock():
+            datas = deque()
+            leafage = self._nearest_search(start)
+            key_index = b(leafage, start)
+            while 1:
+                for kdp in leafage[key_index:]:
+                    if kdp.key.startswith(start):
+                        datas.append((kdp.key, kdp.data))
+                    else:
+                        return datas
+                if leafage.next_node is not None:
+                    leafage = leafage.next_node
+                else:
+                    break
+            return datas
+
+    def get(self, key: Union[int, str]) -> Any:
+        with BPTLock.read_lock():
             leafage = self._nearest_search(key)
             key_index = b(leafage, key)
             if (_kdp := leafage[key_index]) != key:
@@ -853,7 +822,7 @@ class BPTree:
                 )
             return _kdp.data
 
-    def insert(self, key: int, data):
+    def insert(self, key: Union[int, str], data):
         with BPTLock.write_lock():
             if self.root:
                 leafage = self._nearest_search(key)
@@ -866,14 +835,14 @@ class BPTree:
 
             return leafage
 
-    def remove(self, key: int):
+    def remove(self, key: Union[int, str]):
         with BPTLock.write_lock():
             leafage = self._nearest_search(key)
             leafage.remove_data(key)
             leafage.balanced()
             self._key_num -= 1
 
-    def update(self, key: int, data):
+    def update(self, key: Union[int], data):
         with BPTLock.write_lock():
             leafage = self._nearest_search(key)
             leafage.update_data(key, data)
@@ -881,6 +850,16 @@ class BPTree:
     def __len__(self):
         return self._key_num
 
+    def __contains__(self, key: Union[int, str]):
+        with BPTLock.read_lock():
+            if not self.root:
+                return False
+            leafage = self._nearest_search(key)
+            key_index = b(leafage, key)
+            try:
+                return key == leafage[key_index]
+            except IndexError:
+                return False
 
     def __bool__(self):
         if self.root:
@@ -910,6 +889,7 @@ class BPTree:
         file_path.unlink(missing_ok=True)
         s = "BPTBranchingFactor:".encode("utf-8")
         s += bpt.branching_factor.to_bytes(8, "big")
+        s += bpt.key_type.encode("utf-8")
         if not bpt.root:
             raise RuntimeError("Empty Tree")
         node = bpt.root
@@ -921,9 +901,8 @@ class BPTree:
             f.write(s)
             while node is not None:
                 for kdp in node:
-                    d = data_to_bytes(kdp.data)
-                    k = kdp.key.to_bytes(32, "big")
-                    d = len(d).to_bytes(32, "big") + k + d
+                    d = data_to_bytes((kdp.key, kdp.data))
+                    d = len(d).to_bytes(32, "big") + d
                     f.write(d)
                 node = node.next_node
 
@@ -942,20 +921,25 @@ class BPTree:
         with file_path.open("rb") as f:
             end = f.seek(0, 2)
             f.seek(0)
-            head = f.read(27)
-            head, branching_factor = head[:19], head[19:]
+            head = f.read(30)
+            head, branching_factor, key_type = head[:19], head[19:27], head[27:]
             head = head.decode("utf-8")
+            key_type = key_type.decode("utf-8")
             if head != "BPTBranchingFactor:":
                 raise TypeError("Not is BPTree")
             branching_factor = int.from_bytes(branching_factor, "big")
-            logger.debug(f"BPT head: {head} branching_factor: {branching_factor}")
-            bpt = BPTree(branching_factor)
+            logger.debug(
+                f"BPT head: {head} branching_factor: {branching_factor} "
+                f"key_type: {key_type}"
+            )
+            bpt = BPTree(branching_factor, key_type)
             while f.tell() != end:
                 l = f.read(32)
-                k = f.read(32)
                 l = int.from_bytes(l, "big")
                 d = f.read(l)
-                k = int.from_bytes(k, "big")
-                data = bytes_to_data(d)
+                d = bytes_to_data(d)
+                k, data = d[0], d[1]
+                if bpt.key_type == "int":
+                    k = int(k)
                 bpt.insert(k, data)
         return bpt

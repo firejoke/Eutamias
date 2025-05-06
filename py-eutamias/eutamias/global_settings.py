@@ -45,9 +45,11 @@ class _Settings:
     BPT_FACTOR =  math.ceil(100000 ** (1/3))
 
     CHESTNUTS: Path = None
-    CHESTNUT_MAX_VERSION = 100
-    CHESTNUT_MAX_SIZE = 10000
-    CHESTNUT_BACKUP_COUNT = LazyAttribute(
+    CHESTNUTS_MEDATA = (
+        "Eutamias {VERSION} {latest_addr} BlockHead{BLOCK_HEAD_LIMIT}"
+    )
+    CHESTNUTS_DELETE_PREFIX = "-DEL-"
+    CHESTNUTS_BACKUP_COUNT = LazyAttribute(
         raw=10,
         process=lambda instance, p: TypeValidator(int)(p)
     )

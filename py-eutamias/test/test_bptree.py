@@ -6,9 +6,12 @@ import logging
 import math
 import random
 import secrets
+import string
 import sys
 import time
 from pathlib import Path
+from queue import Queue
+from threading import Thread
 
 from gaterpc.utils import msg_pack, msg_unpack
 
@@ -79,70 +82,144 @@ def sum_leafage(bpt):
         node = node.next_node
 
 
+class ExceptionHandlingThread(Thread):
+    def __init__(
+        self, group=None, target=None, name=None, args=(), kwargs={}, *,
+        daemon=None
+    ):
+        super().__init__(
+            group=group, target=target, name=name, args=args, kwargs=kwargs,
+            daemon=daemon
+        )
+        self.exception = None
+
+    def run(self):
+        try:
+            super().run()
+        except Exception as e:
+            self.exception = e
+            raise e
+
+
 def _get(bpt, q, name):
+    print(f"get({name}) start")
     i = 0
     while 1:
         k = q.get()
-        if k == name:
-            print(f"{name} get {i}")
+        if k == "end":
+            print(f"get({name}) end, processed {i}")
+            q.put("end")
             return
-        elif not isinstance(k, int):
-            q.put(k)
-            continue
         i += 1
         _ = bpt.get(k)
+        # assert k in bpt
+        q.task_done()
 
 
-def _rm(bpt, q, name):
+def _rm(bpt, q, name, iq=None):
+    print(f"remove({name}) start)")
     i = 0
     while 1:
         k = q.get()
-        if k == name:
-            print(f"{name} remove {i}")
+        if k == "end":
+            print(f"remove({name}) end, processed {i}")
+            q.put("end")
             return
-        elif not isinstance(k, int):
-            q.put(k)
-            continue
         i += 1
-        _ = bpt.remove(k)
+        v = bpt.remove(k)
+        q.task_done()
+        if iq is not None:
+            iq.put((k, v))
+
+
+def _insert(bpt, q, name):
+    print(f"insert({name}) start")
+    i = 0
+    while 1:
+        k, v = q.get()
+        if k == "end":
+            print(f"insert({name}) end, processed {i}")
+            q.put(("end", ""))
+            return
+        i += 1
+        bpt.insert(k, v)
+        q.task_done()
 
 
 def test_concurrent():
-    from queue import Queue
-    from threading import Thread
-
     bpt_dump = base_path.joinpath("bpt.dump")
     bpt_key = base_path.joinpath("bpt_key.txt")
-    bpt = BPTree.load(bpt_dump, msg_unpack)
-    q = Queue()
-    t1 = Thread(target=_get, args=(bpt, q, "t1"))
-    t2 = Thread(target=_rm, args=(bpt, q, "t2"))
-    t3 = Thread(target=_get, args=(bpt, q, "t3"))
-    t4 = Thread(target=_rm, args=(bpt, q, "t4"))
-    t1.start()
-    t2.start()
-    t3.start()
-    t4.start()
-    with open(bpt_key) as f:
-        for l in f:
-            q.put(int(l.strip()))
-    q.put("t1")
-    q.put("t2")
-    q.put("t3")
-    q.put("t4")
-    t1.join()
-    t2.join()
-    t3.join()
-    t4.join()
+    b = 1000
+    while b:
+        bpt = BPTree.load(bpt_dump, msg_unpack)
+        q = Queue()
+        iq = Queue()
+        t1 = ExceptionHandlingThread(target=_get, args=(bpt, q, "t1"))
+        t2 = ExceptionHandlingThread(
+            target=_rm, args=(bpt, q, "t2"), kwargs={"iq": iq}
+        )
+        t3 = ExceptionHandlingThread(target=_get, args=(bpt, q, "t3"))
+        t4 = ExceptionHandlingThread(
+            target=_rm, args=(bpt, q, "t4"), kwargs={"iq": iq}
+        )
+        t5 = ExceptionHandlingThread(target=_insert, args=(bpt, iq, "t5"))
+        t6 = ExceptionHandlingThread(target=_insert, args=(bpt, iq, "t6"))
+        for t in (t1, t2, t3, t4, t5, t6):
+            t.start()
+        with open(bpt_key) as f:
+            for l in f:
+                k = l.strip()
+                if bpt.key_type == "int":
+                    k = int(k)
+                q.put(k)
+        q.put("end")
+        t1.join()
+        t2.join()
+        t3.join()
+        t4.join()
+        iq.put(("end", ""))
+        t5.join()
+        t6.join()
+        for t in (t1, t2, t3, t4, t5, t6):
+            if t.exception:
+                raise t.exception
+        b -= 1
 
 
 def test_key_insert(k):
     bpt_dump = base_path.joinpath("bpt.dump")
     bpt = BPTree.load(bpt_dump, msg_unpack)
-    k = int(k)
+    if bpt.key_type == "int":
+        k = int(k)
     data = secrets.token_hex()
-    leafage = bpt.nearest_search(k)
-    leafage.add_data(k, data)
+    bpt.insert(k, data)
+    BPTree.dump(
+        bpt, bpt_dump,
+        msg_pack
+    )
+
+
+def test_key_get(k):
+    bpt_dump = base_path.joinpath("bpt.dump")
+    bpt = BPTree.load(bpt_dump, msg_unpack)
+    if bpt.key_type == "int":
+        k = int(k)
+    return bpt.get(k)
+
+
+def test_key_range(s, e):
+    bpt_dump = base_path.joinpath("bpt.dump")
+    bpt = BPTree.load(bpt_dump, msg_unpack)
+    if bpt.key_type == "int":
+        s = int(s)
+        e = int(e)
+    return bpt.range_query(s, e)
+
+
+def test_startswith(s):
+    bpt_dump = base_path.joinpath("bpt.dump")
+    bpt = BPTree.load(bpt_dump, msg_unpack)
+    return bpt.startswith(s)
 
 
 def test_load():
@@ -152,7 +229,9 @@ def test_load():
     gtime = [1, 0, 0, 0]
     with open(bpt_key) as f:
         for l in f:
-            k = int(l.strip())
+            k = l.strip()
+            if bpt.key_type == "int":
+                k = int(k)
             st = time.time()
             _ = bpt.get(k)
             ut = time.time() - st
@@ -169,7 +248,7 @@ def test_load():
     )
 
 
-def test(key_num: int, dump=True):
+def test(key_num: int, key_type="int", dump=True):
     factor = math.ceil(math.pow(key_num, 1/3))
     d = dict()
     ks = set()
@@ -187,9 +266,12 @@ def test(key_num: int, dump=True):
     bptctime = [1, 0, 0, 0]
     bptgtime = [1, 0, 0, 0]
     bptrtime = [1, 0, 0, 0]
-    bpt = BPTree(factor)
-    rl = list(range(key_num))
-    for key in random.sample(rl, key_num):
+    bpt = BPTree(factor, key_type=key_type)
+    while key_num:
+        if key_type == "int":
+            key = int.from_bytes(secrets.token_bytes(8), "big")
+        elif key_type == "str":
+            key = secrets.token_hex(16)
         data = secrets.token_hex()
         st = time.time()
         d[key] = data
@@ -215,6 +297,7 @@ def test(key_num: int, dump=True):
         if bpt_key:
             bpt_key.write(f"{key}\n")
         ks.add(key)
+        key_num -= 1
 
     if dump:
         BPTree.dump(
@@ -277,7 +360,7 @@ def test(key_num: int, dump=True):
     return dctime, dgtime, drtime, bptctime, bptgtime, bptrtime
 
 
-def batch_test(key_num:int, number: int):
+def batch_test(key_num:int, number: int, key_type="int"):
     i = number
     dctime = [1, 1, 0]
     dgtime = [1, 1, 0]
@@ -286,7 +369,7 @@ def batch_test(key_num:int, number: int):
     bptgtime = [1, 1, 0]
     bptrtime = [1, 1, 0]
     while i:
-        dc, dg, dr, bptc, bptg, bptr = test(key_num, False)
+        dc, dg, dr, bptc, bptg, bptr = test(key_num, key_type, False)
         i -= 1
         dctime[0] = min(dctime[0], dc[0])
         dctime[1] = min(dctime[1], dc[1])
@@ -319,17 +402,27 @@ if __name__ == '__main__':
     logger = logging.getLogger("eutamias")
     argv = sys.argv[1:]
     if argv[0] == "batch":
-        batch_test(int(argv[1]), int(argv[2]))
+        key_type = argv[1] if len(argv) > 1 else "int"
+        batch_test(int(argv[1]), int(argv[2]), key_type)
     elif argv[0] == "load":
         test_load()
     elif argv[0] == "concurrent":
         test_concurrent()
     elif argv[0] == "insert":
         test_key_insert(argv[1])
-    elif len(argv) > 1:
+    elif argv[0] == "get":
+        print(test_key_get(argv[1]))
+    elif argv[0] == "range":
+        print(test_key_range(argv[1], argv[2]))
+    elif argv[0] == "startswith":
+        print(test_startswith(argv[1]))
+    elif len(argv) > 2:
         print("batch key_num run_num, load, concurrent")
     else:
-        dct, dgt, drt, bptct, bptgt, bptrt = test(int(argv[0]))
+        key_type = argv[1] if len(argv) > 1 else "int"
+        dct, dgt, drt, bptct, bptgt, bptrt = test(
+            int(argv[0]), key_type
+        )
         logger.info(f"dctime: {dct}")
         logger.info(f"bptctime: {bptct}")
         logger.info(f"dgtime: {dgt}")
